@@ -1,0 +1,364 @@
+--// UI Library
+local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/Robojini/Tuturial_UI_Library/main/UI_Template_1"))()
+local Window = Library.CreateLib("Ore ESP (Debug/Admin)", "RJTheme3")
+
+--// Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+
+--// Tab/Section
+local Tab = Window:NewTab("ESP")
+local Section = Tab:NewSection("Настройки")
+
+--// ====== VALUES ======
+local VALUES = {
+	Plutonium = 1100,
+	Uranium = 1000,
+	Emerald = 600,
+	Mercury = 450,
+	Jade = 400,
+	Obsidian = 350,
+	Sapphire = 325,
+	Diamond = 300,
+	Iridium = 275,
+	Lithium = 200,
+	Limestone = 140,
+	Cobalt = 120,
+	Quartz = 102,
+	Gold = 100,
+	Ruby = 85,
+	Titanium = 70,
+	Coal = 35,
+	Silver = 25,
+	Aluminium = 20,
+	Copper = 20,
+	Bronze = 10,
+	Nickel = 9,
+	Iron = 8,
+}
+
+--// SETTINGS (default: всё выключено)
+local masterEnabled = false
+local maxDistance = 12000
+local UPDATE_INTERVAL = 0.2 -- 200ms
+
+local enabledMinerals = {} -- [TypeName] = bool
+for t in pairs(VALUES) do
+	enabledMinerals[t] = false
+end
+
+--// CACHES / REGISTRY
+-- tracked[obj] = { part = BasePart, type = string?, price = number?, locked = bool? }
+local tracked = {}
+local trackedCount = 0
+
+-- onlyShown[obj] = true (объекты, у которых сейчас показан BillboardGui)
+local onlyShown = {}
+
+-- GUI pool: не Destroy/Create постоянно
+local guiPool = {}      -- {BillboardGui,...}
+local guiInUse = {}     -- [BillboardGui]=true
+local guiByObj = {}     -- [Instance]=BillboardGui
+
+-- connections for attribute updates
+local connByObj = {}    -- [Instance] = {RBXScriptConnection,...}
+
+-- root cache
+local rootPart = nil
+
+--// Helpers
+local function getMainPart(obj)
+	if obj:IsA("BasePart") then
+		return obj
+	end
+	if obj:IsA("Model") then
+		return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+	end
+	return nil
+end
+
+local function ensureRoot()
+	local char = LocalPlayer.Character
+	if not char then
+		rootPart = nil
+		return
+	end
+	rootPart = char:FindFirstChild("HumanoidRootPart")
+end
+
+LocalPlayer.CharacterAdded:Connect(function()
+	task.defer(ensureRoot)
+end)
+ensureRoot()
+
+--// GUI pool
+local function makeBillboard()
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "TextESP"
+	billboard.Size = UDim2.new(0, 220, 0, 60)
+	billboard.StudsOffset = Vector3.new(0, 3, 0)
+	billboard.AlwaysOnTop = true
+	billboard.Enabled = false
+
+	local label = Instance.new("TextLabel")
+	label.Name = "Label"
+	label.Size = UDim2.new(1, 0, 1, 0)
+	label.BackgroundTransparency = 1
+	label.TextScaled = true
+	label.Font = Enum.Font.SourceSansBold
+	label.TextStrokeTransparency = 0
+	label.TextColor3 = Color3.fromRGB(255, 255, 255)
+	label.Text = ""
+	label.Parent = billboard
+
+	return billboard
+end
+
+local function acquireGui()
+	local gui = table.remove(guiPool)
+	if not gui then gui = makeBillboard() end
+	guiInUse[gui] = true
+	gui.Enabled = true
+	return gui
+end
+
+local function releaseGui(gui)
+	if not gui then return end
+	gui.Enabled = false
+	gui.Adornee = nil
+	gui.Parent = nil
+	guiInUse[gui] = nil
+	table.insert(guiPool, gui)
+end
+
+local function hideForObj(obj)
+	local gui = guiByObj[obj]
+	if gui then
+		guiByObj[obj] = nil
+		releaseGui(gui)
+	end
+	onlyShown[obj] = nil
+end
+
+local function showForObj(obj, part, text)
+	local gui = guiByObj[obj]
+	if not gui then
+		gui = acquireGui()
+		guiByObj[obj] = gui
+	end
+	gui.Adornee = part
+	gui.Parent = obj
+
+	local label = gui:FindFirstChild("Label")
+	if label then
+		label.Text = text
+	end
+
+	onlyShown[obj] = true
+end
+
+--// Track/untrack
+local function disconnectObj(obj)
+	local list = connByObj[obj]
+	if list then
+		for _, c in ipairs(list) do
+			pcall(function() c:Disconnect() end)
+		end
+	end
+	connByObj[obj] = nil
+end
+
+local function untrack(obj)
+	if tracked[obj] then
+		tracked[obj] = nil
+		trackedCount -= 1
+	end
+	hideForObj(obj)
+	disconnectObj(obj)
+end
+
+local function updateCacheFor(obj)
+	local info = tracked[obj]
+	if not info then return end
+
+	info.locked = obj:GetAttribute("Locked")
+	info.type = obj:GetAttribute("Type")
+
+	if info.type and VALUES[info.type] then
+		info.price = VALUES[info.type]
+	else
+		info.price = nil
+	end
+end
+
+local function shouldBeConsidered(info)
+	-- мастер выключен => нет
+	if not masterEnabled then return false end
+	-- нет цены => не наш минерал
+	if not info.price then return false end
+	-- Locked должен быть false
+	if info.locked ~= false then return false end
+	-- галочка минерала
+	if not enabledMinerals[info.type] then return false end
+	-- должен быть part
+	if not info.part or not info.part.Parent then return false end
+	return true
+end
+
+local function watch(obj)
+	if tracked[obj] then
+		return
+	end
+
+	if not obj:IsA("Model") and not obj:IsA("BasePart") then
+		return
+	end
+
+	local part = getMainPart(obj)
+	if not part then return end
+
+	tracked[obj] = { part = part, type = nil, price = nil, locked = nil }
+	trackedCount += 1
+
+	updateCacheFor(obj)
+
+	connByObj[obj] = connByObj[obj] or {}
+
+	table.insert(connByObj[obj], obj:GetAttributeChangedSignal("Locked"):Connect(function()
+		updateCacheFor(obj)
+	end))
+
+	table.insert(connByObj[obj], obj:GetAttributeChangedSignal("Type"):Connect(function()
+		updateCacheFor(obj)
+	end))
+
+	table.insert(connByObj[obj], obj.AncestryChanged:Connect(function(_, parent)
+		if parent == nil then
+			untrack(obj)
+		end
+	end))
+end
+
+local function scanWorkspaceOnce()
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		watch(obj)
+	end
+end
+
+scanWorkspaceOnce()
+workspace.DescendantAdded:Connect(watch)
+
+--// MAIN UPDATE LOOP (каждые 200мс)
+task.spawn(function()
+	while true do
+		task.wait(UPDATE_INTERVAL)
+
+		-- обновим root (на случай телепорта/респавна)
+		if not rootPart or not rootPart.Parent then
+			ensureRoot()
+		end
+
+		-- если мастер выключен — быстро убираем всё, цикл не грузим
+		if not masterEnabled then
+			-- прячем только то, что было показано (быстро)
+			for obj in pairs(onlyShown) do
+				hideForObj(obj)
+			end
+			continue
+		end
+
+		local root = rootPart
+		-- если root нет, скрываем всё показанное
+		if not root then
+			for obj in pairs(onlyShown) do
+				hideForObj(obj)
+			end
+			continue
+		end
+
+		local rootPos = root.Position
+
+		-- 1) сначала обновляем/показываем подходящие
+		for obj, info in pairs(tracked) do
+			-- часть могла поменяться (например PrimaryPart назначили позже)
+			if (not info.part) or (info.part and not info.part.Parent) then
+				local p = getMainPart(obj)
+				info.part = p
+			end
+
+			if shouldBeConsidered(info) then
+				local pos = info.part.Position
+				local dist = (rootPos - pos).Magnitude
+				if dist <= maxDistance then
+					local text = string.format("%s\n%s\n%dm", info.type, tostring(info.price), math.floor(dist + 0.5))
+					showForObj(obj, info.part, text)
+				else
+					hideForObj(obj)
+				end
+			else
+				hideForObj(obj)
+			end
+		end
+
+		-- (опционально) можно чистить пул, но обычно не надо
+	end
+end)
+
+--// UI
+Section:NewLabel("По умолчанию всё выключено • Обновление дистанции: 200мс")
+
+Section:NewToggle("ESP (Master)", "Вкл/выкл все метки", function(state)
+	masterEnabled = state
+	-- мгновенно обновим видимость
+	if not masterEnabled then
+		for obj in pairs(onlyShown) do
+			hideForObj(obj)
+		end
+	end
+end)
+
+Section:NewSlider("Distance", "Максимальная дистанция (0..12000)", 12000, 0, function(v)
+	maxDistance = v
+end)
+
+Section:NewButton("Enable ALL minerals", "Включить все минералы", function()
+	for t in pairs(enabledMinerals) do
+		enabledMinerals[t] = true
+	end
+end)
+
+Section:NewButton("Disable ALL minerals", "Выключить все минералы", function()
+	for t in pairs(enabledMinerals) do
+		enabledMinerals[t] = false
+	end
+	for obj in pairs(onlyShown) do
+		hideForObj(obj)
+	end
+end)
+
+--// Miner toggles (sorted by price desc)
+local MineralsSection = Tab:NewSection("Минералы (галочки)")
+
+local sorted = {}
+for t, v in pairs(VALUES) do
+	table.insert(sorted, {t=t, v=v})
+end
+table.sort(sorted, function(a,b) return a.v > b.v end)
+
+for _, item in ipairs(sorted) do
+	local t = item.t
+	local price = item.v
+	MineralsSection:NewToggle(t .. " (" .. tostring(price) .. ")", "Показывать " .. t, function(state)
+		enabledMinerals[t] = state
+		-- если выключили конкретный минерал — мгновенно спрячем все его метки
+		if not state then
+			for obj, info in pairs(tracked) do
+				if info.type == t then
+					hideForObj(obj)
+				end
+			end
+		end
+	end)
+end
