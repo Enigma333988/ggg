@@ -7,6 +7,9 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
+local CoreGui = game:GetService("CoreGui")
+
+local WINDOW_TITLE = "Ore ESP (Debug/Admin)"
 
 --// Tab/Section
 local Tab = Window:NewTab("ESP")
@@ -306,6 +309,99 @@ task.spawn(function()
 	end
 end)
 
+local function ensureMinimizeButton()
+	local function findWindowParts()
+		local containers = {CoreGui}
+		if LocalPlayer:FindFirstChild("PlayerGui") then
+			table.insert(containers, LocalPlayer.PlayerGui)
+		end
+
+		for _, container in ipairs(containers) do
+			for _, uiObj in ipairs(container:GetDescendants()) do
+				if (uiObj:IsA("TextLabel") or uiObj:IsA("TextButton")) and uiObj.Text == WINDOW_TITLE then
+					local topBar = uiObj.Parent
+					local root = topBar and topBar.Parent
+					if topBar and root and root:IsA("GuiObject") then
+						local closeButton = nil
+						for _, child in ipairs(topBar:GetChildren()) do
+							if child:IsA("TextButton") and string.lower(child.Text) == "x" then
+								closeButton = child
+								break
+							end
+						end
+						if closeButton then
+							return root, topBar, closeButton
+						end
+					end
+				end
+			end
+		end
+		return nil, nil, nil
+	end
+
+	task.spawn(function()
+		local tries = 0
+		while tries < 120 do
+			tries += 1
+			local root, topBar, closeButton = findWindowParts()
+			if root and topBar and closeButton then
+				if topBar:FindFirstChild("MinimizeButton") then
+					return
+				end
+
+				local minimizeButton = Instance.new("TextButton")
+				minimizeButton.Name = "MinimizeButton"
+				minimizeButton.Text = "—"
+				minimizeButton.Size = closeButton.Size
+				minimizeButton.Position = UDim2.new(
+					closeButton.Position.X.Scale,
+					closeButton.Position.X.Offset - closeButton.Size.X.Offset - 6,
+					closeButton.Position.Y.Scale,
+					closeButton.Position.Y.Offset
+				)
+				minimizeButton.BackgroundColor3 = closeButton.BackgroundColor3
+				minimizeButton.TextColor3 = closeButton.TextColor3
+				minimizeButton.Font = closeButton.Font
+				minimizeButton.TextScaled = closeButton.TextScaled
+				minimizeButton.TextSize = closeButton.TextSize
+				minimizeButton.ZIndex = closeButton.ZIndex
+				minimizeButton.Parent = topBar
+
+				local minimized = false
+				local originalSize = root.Size
+				local originalVisibility = {}
+
+				minimizeButton.MouseButton1Click:Connect(function()
+					if not minimized then
+						originalSize = root.Size
+						table.clear(originalVisibility)
+						for _, child in ipairs(root:GetChildren()) do
+							if child ~= topBar and child:IsA("GuiObject") then
+								originalVisibility[child] = child.Visible
+								child.Visible = false
+							end
+						end
+						root.Size = UDim2.new(originalSize.X.Scale, originalSize.X.Offset, 0, topBar.AbsoluteSize.Y + 8)
+						minimizeButton.Text = "□"
+						minimized = true
+					else
+						for child, wasVisible in pairs(originalVisibility) do
+							if child and child.Parent == root then
+								child.Visible = wasVisible
+							end
+						end
+						root.Size = originalSize
+						minimizeButton.Text = "—"
+						minimized = false
+					end
+				end)
+				return
+			end
+			task.wait(0.1)
+		end
+	end)
+end
+
 --// UI
 Section:NewLabel("По умолчанию всё выключено • Обновление дистанции: 200мс")
 
@@ -362,3 +458,6 @@ for _, item in ipairs(sorted) do
 		end
 	end)
 end
+
+
+ensureMinimizeButton()
